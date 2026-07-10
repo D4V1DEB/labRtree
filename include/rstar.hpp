@@ -35,14 +35,7 @@ public:
         level_reinserted.clear();
 
         Rect r(x, y, x, y);
-        Node* leaf = chooseLeaf(root, r);
-        Node::Entry e;
-        e.mbr = r;
-        e.child = nullptr;
-        e.point_id = point_id;
-        leaf->entries.push_back(e);
-        leaf->updateMBR();
-        adjustTree(leaf);
+        insertPointInternal(point_id, r, 0);
     }
 
     Node* chooseLeaf(Node* node, const Rect& r) {
@@ -73,9 +66,87 @@ public:
     }
 
     void adjustTree(Node* node) {
+        int level = nodeLevel(node);
+        adjustTree(node, level);
+    }
+
+    void forcedReinsert(Node* node, int level) {
+        if (!node) return;
+
+        ensureLevelFlag(level);
+        if (level_reinserted[level]) {
+            return;
+        }
+
+        const int originalSize = node->size();
+        if (originalSize <= 0) {
+            level_reinserted[level] = true;
+            return;
+        }
+
+        const double centerX = (node->mbr.min_x + node->mbr.max_x) * 0.5;
+        const double centerY = (node->mbr.min_y + node->mbr.max_y) * 0.5;
+
+        std::vector<std::pair<double, Node::Entry>> ranked;
+        ranked.reserve(node->entries.size());
+        for (const auto& entry : node->entries) {
+            const double entryCenterX = (entry.mbr.min_x + entry.mbr.max_x) * 0.5;
+            const double entryCenterY = (entry.mbr.min_y + entry.mbr.max_y) * 0.5;
+            const double dx = entryCenterX - centerX;
+            const double dy = entryCenterY - centerY;
+            const double dist2 = dx * dx + dy * dy;
+            ranked.push_back({dist2, entry});
+        }
+
+        std::sort(ranked.begin(), ranked.end(), [](const auto& lhs, const auto& rhs) {
+            if (lhs.first != rhs.first) return lhs.first > rhs.first;
+            return lhs.second.point_id > rhs.second.point_id;
+        });
+
+        int toReinsert = static_cast<int>((originalSize * 3 + 9) / 10);
+        if (toReinsert < 1) toReinsert = 1;
+        if (toReinsert > originalSize) toReinsert = originalSize;
+
+        std::vector<Node::Entry> extracted;
+        extracted.reserve(toReinsert);
+        for (int i = 0; i < toReinsert; ++i) {
+            extracted.push_back(ranked[i].second);
+        }
+
+        std::vector<Node::Entry> remaining;
+        remaining.reserve(originalSize - toReinsert);
+        for (int i = toReinsert; i < originalSize; ++i) {
+            remaining.push_back(ranked[i].second);
+        }
+
+        node->entries = remaining;
+        node->updateMBR();
+        level_reinserted[level] = true;
+
+        for (auto& entry : extracted) {
+            if (entry.child == nullptr) {
+                insertPointAtLevel(entry.point_id, entry.mbr.min_x, entry.mbr.min_y, 0);
+            } else {
+                entry.child->parent = nullptr;
+                insertSubtreeAtLevel(entry.child, entry.mbr, level);
+            }
+        }
+    }
+
+    void adjustTree(Node* node, int level) {
         while (node != nullptr) {
             node->updateMBR();
             if (node->isFull(max_entries)) {
+                if (node->parent != nullptr) {
+                    ensureLevelFlag(level);
+                    if (!level_reinserted[level]) {
+                        forcedReinsert(node, level);
+                        node = node->parent;
+                        ++level;
+                        continue;
+                    }
+                }
+
                 auto splitResult = split(node);
                 Node* n1 = splitResult.first;
                 Node* n2 = splitResult.second;
@@ -115,10 +186,12 @@ public:
                     p->entries.push_back(newEntry);
 
                     node = p;
+                    ++level;
                     continue;
                 }
             } else {
                 node = node->parent;
+                ++level;
             }
         }
     }
@@ -292,6 +365,83 @@ public:
     }
 
 private:
+    void insertPointInternal(int point_id, const Rect& r, int target_level) {
+        Node* leaf = chooseLeaf(root, r);
+        Node::Entry e;
+        e.mbr = r;
+        e.child = nullptr;
+        e.point_id = point_id;
+        leaf->entries.push_back(e);
+        leaf->updateMBR();
+        adjustTree(leaf, target_level);
+    }
+
+    void insertPointAtLevel(int point_id, double x, double y, int target_level) {
+        Rect r(x, y, x, y);
+        insertPointInternal(point_id, r, target_level);
+    }
+
+    void insertSubtreeAtLevel(Node* subtree, const Rect& subtreeMbr, int target_level) {
+        if (!subtree) return;
+        Node* destination = chooseNodeAtLevel(root, subtreeMbr, nodeLevel(root), target_level);
+        if (!destination) return;
+
+        Node::Entry entry;
+        entry.mbr = subtree->mbr;
+        entry.child = subtree;
+        entry.point_id = -1;
+        subtree->parent = destination;
+        destination->entries.push_back(entry);
+        destination->updateMBR();
+        adjustTree(destination, target_level);
+    }
+
+    Node* chooseNodeAtLevel(Node* node, const Rect& r, int current_level, int target_level) {
+        if (!node) return nullptr;
+        if (current_level == target_level) return node;
+        if (node->is_leaf) return node;
+
+        double bestIncrease = std::numeric_limits<double>::infinity();
+        double bestArea = std::numeric_limits<double>::infinity();
+        Node::Entry* bestEntry = nullptr;
+
+        for (auto& entry : node->entries) {
+            double areaBefore = entry.mbr.area();
+            Rect expanded = entry.mbr.expandedWith(r);
+            double areaAfter = expanded.area();
+            double increase = areaAfter - areaBefore;
+
+            if (increase < bestIncrease || (increase == bestIncrease && areaBefore < bestArea)) {
+                bestIncrease = increase;
+                bestArea = areaBefore;
+                bestEntry = &entry;
+            }
+        }
+
+        if (!bestEntry || !bestEntry->child) {
+            return node;
+        }
+        return chooseNodeAtLevel(bestEntry->child, r, current_level - 1, target_level);
+    }
+
+    int nodeLevel(Node* node) const {
+        if (!node) return 0;
+        int level = 0;
+        Node* current = node;
+        while (current && !current->is_leaf && !current->entries.empty() && current->entries.front().child) {
+            current = current->entries.front().child;
+            ++level;
+        }
+        return level;
+    }
+
+    void ensureLevelFlag(int level) {
+        if (level < 0) return;
+        if (static_cast<int>(level_reinserted.size()) <= level) {
+            level_reinserted.resize(static_cast<size_t>(level) + 1, false);
+        }
+    }
+
     void destroyNode(Node* node) {
         if (!node) return;
         for (auto& e : node->entries) {
