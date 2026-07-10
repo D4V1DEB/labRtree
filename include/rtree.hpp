@@ -2,6 +2,8 @@
 
 #include <utility>
 #include <algorithm>
+#include <limits>
+#include <vector>
 
 #include "rect.hpp"
 #include "node.hpp"
@@ -119,8 +121,171 @@ public:
     }
 
     std::pair<Node*, Node*> split(Node* node) {
-        (void)node;
-        return {nullptr, nullptr};
+        if (!node) return {nullptr, nullptr};
+
+        std::vector<Node::Entry> all;
+        all.reserve(node->entries.size());
+        for (auto &e : node->entries) all.push_back(e);
+
+        auto get_min = [&](const Node::Entry &e, int axis) {
+            return (axis == 0) ? e.mbr.min_x : e.mbr.min_y;
+        };
+        auto get_max = [&](const Node::Entry &e, int axis) {
+            return (axis == 0) ? e.mbr.max_x : e.mbr.max_y;
+        };
+
+        int bestAxis = 0;
+        double bestSep = -std::numeric_limits<double>::infinity();
+        for (int axis = 0; axis < 2; ++axis) {
+            double minLow = std::numeric_limits<double>::infinity();
+            double maxLow = -std::numeric_limits<double>::infinity();
+            double minHigh = std::numeric_limits<double>::infinity();
+            double maxHigh = -std::numeric_limits<double>::infinity();
+            for (auto &e : all) {
+                double low = get_min(e, axis);
+                double high = get_max(e, axis);
+                minLow = std::min(minLow, low);
+                maxLow = std::max(maxLow, low);
+                minHigh = std::min(minHigh, high);
+                maxHigh = std::max(maxHigh, high);
+            }
+            double width = maxHigh - minLow;
+            double separation = 0.0;
+            if (width > 0.0) {
+                separation = (maxLow - minHigh) / width;
+            } else {
+                separation = 0.0;
+            }
+            if (separation > bestSep) {
+                bestSep = separation;
+                bestAxis = axis;
+            }
+        }
+
+        int seed1 = -1, seed2 = -1;
+        double smallestLow = std::numeric_limits<double>::infinity();
+        double largestHigh = -std::numeric_limits<double>::infinity();
+        for (size_t i = 0; i < all.size(); ++i) {
+            double low = get_min(all[i], bestAxis);
+            double high = get_max(all[i], bestAxis);
+            if (low < smallestLow) { smallestLow = low; seed1 = static_cast<int>(i); }
+            if (high > largestHigh) { largestHigh = high; seed2 = static_cast<int>(i); }
+        }
+
+        if (seed1 == -1 || seed2 == -1) return {nullptr, nullptr};
+        if (seed1 == seed2) {
+            seed2 = (seed1 + 1) % static_cast<int>(all.size());
+        }
+
+        Node* n1 = new Node();
+        Node* n2 = new Node();
+        n1->is_leaf = node->is_leaf;
+        n2->is_leaf = node->is_leaf;
+
+        n1->entries.push_back(all[seed1]);
+        n2->entries.push_back(all[seed2]);
+
+        std::vector<char> assigned(all.size(), 0);
+        assigned[seed1] = 1;
+        assigned[seed2] = 1;
+
+        n1->updateMBR();
+        n2->updateMBR();
+
+        int remaining = static_cast<int>(all.size()) - 2;
+        size_t idx = 0;
+        while (remaining > 0) {
+            int need1 = std::max(0, min_entries - n1->size());
+            int need2 = std::max(0, min_entries - n2->size());
+            if (need1 == remaining) {
+                for (size_t i = 0; i < all.size(); ++i) if (!assigned[i]) {
+                    n1->entries.push_back(all[i]); assigned[i] = 1; --remaining;
+                }
+                break;
+            }
+            if (need2 == remaining) {
+                for (size_t i = 0; i < all.size(); ++i) if (!assigned[i]) {
+                    n2->entries.push_back(all[i]); assigned[i] = 1; --remaining;
+                }
+                break;
+            }
+
+            while (idx < all.size() && assigned[idx]) ++idx;
+            if (idx >= all.size()) break;
+
+            Rect mbr1 = n1->mbr;
+            Rect mbr2 = n2->mbr;
+            double area1 = mbr1.area();
+            double area2 = mbr2.area();
+            Rect expanded1 = mbr1.expandedWith(all[idx].mbr);
+            Rect expanded2 = mbr2.expandedWith(all[idx].mbr);
+            double inc1 = expanded1.area() - area1;
+            double inc2 = expanded2.area() - area2;
+
+            bool assignTo1 = false;
+            if (inc1 < inc2) assignTo1 = true;
+            else if (inc2 < inc1) assignTo1 = false;
+            else {
+                if (area1 < area2) assignTo1 = true;
+                else if (area2 < area1) assignTo1 = false;
+                else {
+                    assignTo1 = (n1->size() <= n2->size());
+                }
+            }
+
+            if (assignTo1) {
+                n1->entries.push_back(all[idx]);
+                n1->updateMBR();
+            } else {
+                n2->entries.push_back(all[idx]);
+                n2->updateMBR();
+            }
+            assigned[idx] = 1;
+            --remaining;
+            while (idx < all.size() && assigned[idx]) ++idx;
+        }
+
+        for (auto &e : n1->entries) if (e.child) e.child->parent = n1;
+        for (auto &e : n2->entries) if (e.child) e.child->parent = n2;
+
+        n1->updateMBR();
+        n2->updateMBR();
+
+        delete node;
+
+        return {n1, n2};
+    }
+
+    std::vector<int> search(const Rect& query, long long& nodes_visited) const {
+        std::vector<int> result;
+        nodes_visited = 0;
+        if (!root) return result;
+
+        std::vector<Node*> stack;
+        stack.push_back(root);
+
+        while (!stack.empty()) {
+            Node* n = stack.back(); stack.pop_back();
+            ++nodes_visited;
+            if (!n) continue;
+            if (n->is_leaf) {
+                for (auto &e : n->entries) {
+                    if (e.point_id != -1) {
+                        if (query.contains(e.mbr.min_x, e.mbr.min_y)) {
+                            result.push_back(e.point_id);
+                        }
+                    }
+                }
+            } else {
+                for (auto &e : n->entries) {
+                    if (query.intersects(e.mbr) && e.child) {
+                        stack.push_back(e.child);
+                    }
+                }
+            }
+        }
+
+        return result;
     }
 
 private:
