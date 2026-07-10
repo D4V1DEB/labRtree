@@ -201,135 +201,175 @@ public:
 
         std::vector<Node::Entry> all;
         all.reserve(node->entries.size());
-        for (auto &e : node->entries) all.push_back(e);
+        for (const auto& entry : node->entries) {
+            all.push_back(entry);
+        }
 
-        auto get_min = [&](const Node::Entry &e, int axis) {
-            return (axis == 0) ? e.mbr.min_x : e.mbr.min_y;
+        auto axisMin = [](const Node::Entry& entry, int axis) {
+            return axis == 0 ? entry.mbr.min_x : entry.mbr.min_y;
         };
-        auto get_max = [&](const Node::Entry &e, int axis) {
-            return (axis == 0) ? e.mbr.max_x : e.mbr.max_y;
+        auto axisMax = [](const Node::Entry& entry, int axis) {
+            return axis == 0 ? entry.mbr.max_x : entry.mbr.max_y;
         };
 
-        int bestAxis = 0;
-        double bestSep = -std::numeric_limits<double>::infinity();
+        struct DistributionResult {
+            bool valid = false;
+            int splitIndex = -1;
+            double overlap = std::numeric_limits<double>::infinity();
+            double area = std::numeric_limits<double>::infinity();
+        };
+
+        auto evaluateDistribution = [&](const std::vector<Node::Entry>& sorted) {
+            DistributionResult best;
+            const int total = static_cast<int>(sorted.size());
+            const int minGroup = min_entries;
+            const int maxFirstGroup = max_entries - min_entries + 1;
+            const int distributions = max_entries - 2 * min_entries + 2;
+
+            for (int d = 0; d < distributions; ++d) {
+                const int firstGroupSize = minGroup + d;
+                if (firstGroupSize < minGroup || firstGroupSize > maxFirstGroup) {
+                    continue;
+                }
+                const int secondGroupSize = total - firstGroupSize;
+                if (secondGroupSize < minGroup) {
+                    continue;
+                }
+
+                Rect mbr1 = sorted[0].mbr;
+                for (int i = 1; i < firstGroupSize; ++i) {
+                    mbr1 = mbr1.expandedWith(sorted[i].mbr);
+                }
+
+                Rect mbr2 = sorted[firstGroupSize].mbr;
+                for (int i = firstGroupSize + 1; i < total; ++i) {
+                    mbr2 = mbr2.expandedWith(sorted[i].mbr);
+                }
+
+                const double overlap = mbr1.overlapArea(mbr2);
+                const double area = mbr1.area() + mbr2.area();
+
+                if (!best.valid || overlap < best.overlap || (overlap == best.overlap && area < best.area)) {
+                    best.valid = true;
+                    best.splitIndex = firstGroupSize;
+                    best.overlap = overlap;
+                    best.area = area;
+                }
+            }
+
+            return best;
+        };
+
+        struct AxisChoice {
+            bool valid = false;
+            int axis = 0;
+            bool sortByMin = true;
+            double goodness = std::numeric_limits<double>::infinity();
+            DistributionResult distribution;
+        };
+
+        AxisChoice bestChoice;
+
         for (int axis = 0; axis < 2; ++axis) {
-            double minLow = std::numeric_limits<double>::infinity();
-            double maxLow = -std::numeric_limits<double>::infinity();
-            double minHigh = std::numeric_limits<double>::infinity();
-            double maxHigh = -std::numeric_limits<double>::infinity();
-            for (auto &e : all) {
-                double low = get_min(e, axis);
-                double high = get_max(e, axis);
-                minLow = std::min(minLow, low);
-                maxLow = std::max(maxLow, low);
-                minHigh = std::min(minHigh, high);
-                maxHigh = std::max(maxHigh, high);
-            }
-            double width = maxHigh - minLow;
-            double separation = 0.0;
-            if (width > 0.0) {
-                separation = (maxLow - minHigh) / width;
-            } else {
-                separation = 0.0;
-            }
-            if (separation > bestSep) {
-                bestSep = separation;
-                bestAxis = axis;
-            }
-        }
+            double bestAxisGoodness = std::numeric_limits<double>::infinity();
+            AxisChoice bestAxisChoice;
 
-        int seed1 = -1, seed2 = -1;
-        double smallestLow = std::numeric_limits<double>::infinity();
-        double largestHigh = -std::numeric_limits<double>::infinity();
-        for (size_t i = 0; i < all.size(); ++i) {
-            double low = get_min(all[i], bestAxis);
-            double high = get_max(all[i], bestAxis);
-            if (low < smallestLow) { smallestLow = low; seed1 = static_cast<int>(i); }
-            if (high > largestHigh) { largestHigh = high; seed2 = static_cast<int>(i); }
-        }
+            for (bool sortByMin : {true, false}) {
+                std::vector<Node::Entry> sorted = all;
+                std::sort(sorted.begin(), sorted.end(), [&](const Node::Entry& lhs, const Node::Entry& rhs) {
+                    const double lhsBound = sortByMin ? axisMin(lhs, axis) : axisMax(lhs, axis);
+                    const double rhsBound = sortByMin ? axisMin(rhs, axis) : axisMax(rhs, axis);
+                    if (lhsBound != rhsBound) return lhsBound < rhsBound;
+                    const double lhsOther = sortByMin ? axisMax(lhs, axis) : axisMin(lhs, axis);
+                    const double rhsOther = sortByMin ? axisMax(rhs, axis) : axisMin(rhs, axis);
+                    return lhsOther < rhsOther;
+                });
 
-        if (seed1 == -1 || seed2 == -1) return {nullptr, nullptr};
-        if (seed1 == seed2) {
-            seed2 = (seed1 + 1) % static_cast<int>(all.size());
-        }
+                const int distributions = max_entries - 2 * min_entries + 2;
+                double goodness = 0.0;
+                for (int d = 0; d < distributions; ++d) {
+                    const int firstGroupSize = min_entries + d;
+                    const int secondGroupSize = static_cast<int>(sorted.size()) - firstGroupSize;
+                    if (firstGroupSize < min_entries || secondGroupSize < min_entries) {
+                        continue;
+                    }
 
-        Node* n1 = new Node();
-        Node* n2 = new Node();
-        n1->is_leaf = node->is_leaf;
-        n2->is_leaf = node->is_leaf;
+                    Rect mbr1 = sorted[0].mbr;
+                    for (int i = 1; i < firstGroupSize; ++i) {
+                        mbr1 = mbr1.expandedWith(sorted[i].mbr);
+                    }
 
-        n1->entries.push_back(all[seed1]);
-        n2->entries.push_back(all[seed2]);
+                    Rect mbr2 = sorted[firstGroupSize].mbr;
+                    for (int i = firstGroupSize + 1; i < static_cast<int>(sorted.size()); ++i) {
+                        mbr2 = mbr2.expandedWith(sorted[i].mbr);
+                    }
 
-        std::vector<char> assigned(all.size(), 0);
-        assigned[seed1] = 1;
-        assigned[seed2] = 1;
-
-        n1->updateMBR();
-        n2->updateMBR();
-
-        int remaining = static_cast<int>(all.size()) - 2;
-        size_t idx = 0;
-        while (remaining > 0) {
-            int need1 = std::max(0, min_entries - n1->size());
-            int need2 = std::max(0, min_entries - n2->size());
-            if (need1 == remaining) {
-                for (size_t i = 0; i < all.size(); ++i) if (!assigned[i]) {
-                    n1->entries.push_back(all[i]); assigned[i] = 1; --remaining;
+                    goodness += mbr1.perimeter() + mbr2.perimeter();
                 }
-                break;
-            }
-            if (need2 == remaining) {
-                for (size_t i = 0; i < all.size(); ++i) if (!assigned[i]) {
-                    n2->entries.push_back(all[i]); assigned[i] = 1; --remaining;
-                }
-                break;
-            }
 
-            while (idx < all.size() && assigned[idx]) ++idx;
-            if (idx >= all.size()) break;
-
-            Rect mbr1 = n1->mbr;
-            Rect mbr2 = n2->mbr;
-            double area1 = mbr1.area();
-            double area2 = mbr2.area();
-            Rect expanded1 = mbr1.expandedWith(all[idx].mbr);
-            Rect expanded2 = mbr2.expandedWith(all[idx].mbr);
-            double inc1 = expanded1.area() - area1;
-            double inc2 = expanded2.area() - area2;
-
-            bool assignTo1 = false;
-            if (inc1 < inc2) assignTo1 = true;
-            else if (inc2 < inc1) assignTo1 = false;
-            else {
-                if (area1 < area2) assignTo1 = true;
-                else if (area2 < area1) assignTo1 = false;
-                else {
-                    assignTo1 = (n1->size() <= n2->size());
+                if (goodness < bestAxisGoodness) {
+                    bestAxisGoodness = goodness;
+                    bestAxisChoice.valid = true;
+                    bestAxisChoice.axis = axis;
+                    bestAxisChoice.sortByMin = sortByMin;
+                    bestAxisChoice.goodness = goodness;
+                    bestAxisChoice.distribution = evaluateDistribution(sorted);
                 }
             }
 
-            if (assignTo1) {
-                n1->entries.push_back(all[idx]);
-                n1->updateMBR();
-            } else {
-                n2->entries.push_back(all[idx]);
-                n2->updateMBR();
+            if (bestAxisChoice.valid && (!bestChoice.valid || bestAxisChoice.goodness < bestChoice.goodness)) {
+                bestChoice = bestAxisChoice;
             }
-            assigned[idx] = 1;
-            --remaining;
-            while (idx < all.size() && assigned[idx]) ++idx;
         }
 
-        for (auto &e : n1->entries) if (e.child) e.child->parent = n1;
-        for (auto &e : n2->entries) if (e.child) e.child->parent = n2;
+        if (!bestChoice.valid || !bestChoice.distribution.valid) {
+            return {nullptr, nullptr};
+        }
 
-        n1->updateMBR();
-        n2->updateMBR();
+        std::vector<Node::Entry> sorted = all;
+        std::sort(sorted.begin(), sorted.end(), [&](const Node::Entry& lhs, const Node::Entry& rhs) {
+            const double lhsBound = bestChoice.sortByMin ? axisMin(lhs, bestChoice.axis) : axisMax(lhs, bestChoice.axis);
+            const double rhsBound = bestChoice.sortByMin ? axisMin(rhs, bestChoice.axis) : axisMax(rhs, bestChoice.axis);
+            if (lhsBound != rhsBound) return lhsBound < rhsBound;
+            const double lhsOther = bestChoice.sortByMin ? axisMax(lhs, bestChoice.axis) : axisMin(lhs, bestChoice.axis);
+            const double rhsOther = bestChoice.sortByMin ? axisMax(rhs, bestChoice.axis) : axisMin(rhs, bestChoice.axis);
+            return lhsOther < rhsOther;
+        });
+
+        const int splitIndex = bestChoice.distribution.splitIndex;
+        if (splitIndex <= 0 || splitIndex >= static_cast<int>(sorted.size())) {
+            return {nullptr, nullptr};
+        }
+
+        Node* first = new Node();
+        Node* second = new Node();
+        first->is_leaf = node->is_leaf;
+        second->is_leaf = node->is_leaf;
+
+        for (int i = 0; i < splitIndex; ++i) {
+            first->entries.push_back(sorted[i]);
+        }
+        for (int i = splitIndex; i < static_cast<int>(sorted.size()); ++i) {
+            second->entries.push_back(sorted[i]);
+        }
+
+        for (auto& entry : first->entries) {
+            if (entry.child) {
+                entry.child->parent = first;
+            }
+        }
+        for (auto& entry : second->entries) {
+            if (entry.child) {
+                entry.child->parent = second;
+            }
+        }
+
+        first->updateMBR();
+        second->updateMBR();
 
         delete node;
 
-        return {n1, n2};
+        return {first, second};
     }
 
     std::vector<int> search(const Rect& query, long long& nodes_visited) const {
