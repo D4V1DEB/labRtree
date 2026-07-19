@@ -135,13 +135,14 @@ public:
 
     void adjustTree(Node* node, int level) {
         while (node != nullptr) {
+            Node* parent = node->parent;
             node->updateMBR();
             if (node->isFull(max_entries)) {
-                if (node->parent != nullptr) {
+                if (parent != nullptr) {
                     ensureLevelFlag(level);
                     if (!level_reinserted[level]) {
                         forcedReinsert(node, level);
-                        node = node->parent;
+                        node = parent;
                         ++level;
                         continue;
                     }
@@ -152,11 +153,11 @@ public:
                 Node* n2 = splitResult.second;
 
                 if (n1 == nullptr && n2 == nullptr) {
-                    node = node->parent;
+                    node = parent;
                     continue;
                 }
 
-                if (node->parent == nullptr) {
+                if (parent == nullptr) {
                     Node* newRoot = new Node();
                     newRoot->is_leaf = false;
                     n1->parent = newRoot;
@@ -170,27 +171,28 @@ public:
                     root = newRoot;
                     return;
                 } else {
-                    Node* p = node->parent;
-                    bool replaced = false;
-                    for (auto it = p->entries.begin(); it != p->entries.end(); ++it) {
-                        if (it->child == node) {
-                            it->child = n1;
-                            it->mbr = n1->mbr;
-                            n1->parent = p;
-                            replaced = true;
+                    Node::Entry newEntry; newEntry.mbr = n2->mbr; newEntry.child = n2; newEntry.point_id = -1;
+                    n2->parent = parent;
+                    int targetIndex = -1;
+                    for (size_t i = 0; i < parent->entries.size(); ++i) {
+                        if (parent->entries[i].child == node) {
+                            targetIndex = static_cast<int>(i);
                             break;
                         }
                     }
-                    Node::Entry newEntry; newEntry.mbr = n2->mbr; newEntry.child = n2; newEntry.point_id = -1;
-                    n2->parent = p;
-                    p->entries.push_back(newEntry);
+                    parent->entries.push_back(newEntry);
+                    if (targetIndex >= 0) {
+                        parent->entries[targetIndex].child = n1;
+                        parent->entries[targetIndex].mbr = n1->mbr;
+                        n1->parent = parent;
+                    }
 
-                    node = p;
+                    node = parent;
                     ++level;
                     continue;
                 }
             } else {
-                node = node->parent;
+                node = parent;
                 ++level;
             }
         }
@@ -341,10 +343,13 @@ public:
             return {nullptr, nullptr};
         }
 
-        Node* first = new Node();
+        // Reuse the original node as the first group to avoid freeing it
+        // (which previously caused use-after-free / heap corruption).
+        Node* first = node;
         Node* second = new Node();
         first->is_leaf = node->is_leaf;
         second->is_leaf = node->is_leaf;
+        first->entries.clear();
 
         for (int i = 0; i < splitIndex; ++i) {
             first->entries.push_back(sorted[i]);
@@ -366,8 +371,6 @@ public:
 
         first->updateMBR();
         second->updateMBR();
-
-        delete node;
 
         return {first, second};
     }

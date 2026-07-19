@@ -71,6 +71,7 @@ public:
 
     void adjustTree(Node* node) {
         while (node != nullptr) {
+            Node* parent = node->parent;
             node->updateMBR();
             if (node->isFull(max_entries)) {
                 auto splitResult = split(node);
@@ -78,11 +79,11 @@ public:
                 Node* n2 = splitResult.second;
 
                 if (n1 == nullptr && n2 == nullptr) {
-                    node = node->parent;
+                    node = parent;
                     continue;
                 }
 
-                if (node->parent == nullptr) {
+                if (parent == nullptr) {
                     Node* newRoot = new Node();
                     newRoot->is_leaf = false;
                     n1->parent = newRoot;
@@ -96,26 +97,27 @@ public:
                     root = newRoot;
                     return;
                 } else {
-                    Node* p = node->parent;
-                    bool replaced = false;
-                    for (auto it = p->entries.begin(); it != p->entries.end(); ++it) {
-                        if (it->child == node) {
-                            it->child = n1;
-                            it->mbr = n1->mbr;
-                            n1->parent = p;
-                            replaced = true;
+                    Node::Entry newEntry; newEntry.mbr = n2->mbr; newEntry.child = n2; newEntry.point_id = -1;
+                    n2->parent = parent;
+                    int targetIndex = -1;
+                    for (size_t i = 0; i < parent->entries.size(); ++i) {
+                        if (parent->entries[i].child == node) {
+                            targetIndex = static_cast<int>(i);
                             break;
                         }
                     }
-                    Node::Entry newEntry; newEntry.mbr = n2->mbr; newEntry.child = n2; newEntry.point_id = -1;
-                    n2->parent = p;
-                    p->entries.push_back(newEntry);
+                    parent->entries.push_back(newEntry);
+                    if (targetIndex >= 0) {
+                        parent->entries[targetIndex].child = n1;
+                        parent->entries[targetIndex].mbr = n1->mbr;
+                        n1->parent = parent;
+                    }
 
-                    node = p;
+                    node = parent;
                     continue;
                 }
             } else {
-                node = node->parent;
+                node = parent;
             }
         }
     }
@@ -177,11 +179,15 @@ public:
             seed2 = (seed1 + 1) % static_cast<int>(all.size());
         }
 
-        Node* n1 = new Node();
+        // Reuse the original node as the first group (n1) and only allocate
+        // a new node for the second group (n2). This avoids freeing node and
+        // the use-after-free / heap-corruption that came from `delete node`.
+        Node* n1 = node;
         Node* n2 = new Node();
         n1->is_leaf = node->is_leaf;
         n2->is_leaf = node->is_leaf;
 
+        n1->entries.clear();
         n1->entries.push_back(all[seed1]);
         n2->entries.push_back(all[seed2]);
 
@@ -250,8 +256,6 @@ public:
 
         n1->updateMBR();
         n2->updateMBR();
-
-        delete node;
 
         return {n1, n2};
     }
