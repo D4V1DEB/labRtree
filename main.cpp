@@ -1,8 +1,8 @@
 #include <ctime>
 
-#include "experiment1.hpp"
-#include "experiment2.hpp"
-#include "experiment3.hpp"
+#include "tests/experiment1.hpp"
+#include "tests/experiment2.hpp"
+#include "tests/experiment3.hpp"
 
 // Funcion para medir tiempo (milisegundos de CPU, portable en Linux/WSL).
 // Usa clock() en vez de tiempo de pared: estable bajo carga de la maquina.
