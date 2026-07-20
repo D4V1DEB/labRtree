@@ -407,6 +407,19 @@ public:
         return result;
     }
 
+    int computeHeight() const {
+        if (!root) return 0;
+        int height = 1;
+        Node* current = root;
+        while (current && !current->is_leaf && !current->entries.empty()) {
+            Node* child = current->entries.front().child;
+            if (!child) break;
+            current = child;
+            ++height;
+        }
+        return height;
+    }
+
 private:
     void insertPointInternal(int point_id, const Rect& r, int target_level) {
         Node* leaf = chooseLeaf(root, r);
