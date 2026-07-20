@@ -1,0 +1,5 @@
+distribucion,arbol,tiempo_insercion_ms,tiempo_busqueda_prom_ms,nodos_visitados_prom
+uniforme,RTree,1.418000,0.006490,149.540000
+uniforme,RStarTree,2.951000,0.003360,85.190000
+agrupada,RTree,1.160000,0.002730,88.210000
+agrupada,RStarTree,2.633000,0.002390,70.130000
